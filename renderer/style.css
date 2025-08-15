@@ -1,4 +1,4 @@
-/* custom/style.css */
+/* renderer/style.css */
 
 html, body {
   margin: 0;
@@ -10,14 +10,24 @@ html, body {
 #command-panel {
   width: 100%;
   box-sizing: border-box;
-  padding: 6px;
+  padding: 8px;
   background: rgba(0, 0, 0, 0.6);
+
   display: flex;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
+  gap: 8px;            /* space between rows */
 }
 
-#command-panel button {
+.button-row,
+.chat-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;            /* space between items */
+}
+
+#command-panel button,
+#command-panel input {
   font-size: 14px;
   padding: 6px 12px;
   border: none;
@@ -25,8 +35,15 @@ html, body {
   cursor: pointer;
 }
 
-/* you can add hover/focus styles here */
+#command-panel input {
+  flex: 1;             /* expand to fill row */
+  max-width: 300px;
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+
 #command-panel button:hover {
-  background: rgba(255,255,255,0.1);
+  background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }

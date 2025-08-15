@@ -1,8 +1,10 @@
 // main.js
+const repl = require('repl');
 const path = require('path');
 const { app, BrowserWindow, ipcMain } = require('electron')
 const fs = require('fs');
 const mineflayer = require('mineflayer');
+const viaproxy = require('mineflayer-viaproxy')
 const viewer = require('prismarine-viewer').mineflayer;
 
 const { pathfinder, Movements, goals: { GoalBlock, GoalNear } } = require('mineflayer-pathfinder');
@@ -10,16 +12,18 @@ const Vec3 = require('vec3');
 
 const fishing = require('./fishing')
 
+let mcData;
 let yaw = 0;
 let pitch = 0;
 let bot;
+let isAttacking = false;
 
 function getAsset(s) {
   return path.join(__dirname, '..', 'renderer', s);
 }
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  let mainWindow = new BrowserWindow({
     width: 1024,
     height: 768,
     webPreferences: {
@@ -32,12 +36,6 @@ function createWindow() {
   mainWindow.loadURL('http://localhost:3000/?mineflayer');
 
   mainWindow.webContents.on('did-finish-load', () => {
-    // const css = fs.readFileSync(getAsset('style.css'), 'utf8');
-    // mainWindow.webContents.insertCSS(css);
-    // const snippet = fs.readFileSync(getAsset('snippet.html'), 'utf8')
-    //   .replace(/`/g, '\\`')
-    //   .replace(/\$\{/g, '\\${');
-
     mainWindow.webContents.executeJavaScript(`
 
     // grab references
@@ -61,19 +59,22 @@ function createWindow() {
 
 }
 
-function startBot() {
-  bot = mineflayer.createBot({
+async function startBot() {
+  bot = await viaproxy.createBot({
     host: 'localhost',   // Minecraft server host
     port: 25565,         // Minecraft server port
-    username: 'Bot'      // Bot username
+    username: 'Bot',      // Bot username
+    forceViaProxy: true,
+    auth: 'offline',
+    localAuth: viaproxy.AuthType.NONE
   });
 
-  bot.once('spawn', () => {
+  bot.on('spawn', () => {
     console.log('✅ Bot spawned, launching viewer');
 
     bot.loadPlugin(pathfinder);
     // configure default movements (so it knows what blocks it can walk on)
-    const mcData = require('minecraft-data')(bot.version);
+    mcData = require('minecraft-data')(bot.version);
     let defaultMoves = new Movements(bot, mcData);
     defaultMoves.allowFreeMotion = true;
     bot.pathfinder.setMovements(defaultMoves);
@@ -82,8 +83,6 @@ function startBot() {
     viewer(bot, { firstPerson: true, port: 3000 });
     createWindow();
   });
-
-  let isAttacking = false;
 
   ipcMain.on('control', (ev, control, state) => {
     // movement as above…
@@ -94,25 +93,7 @@ function startBot() {
     }
 
     if (control === 'attack') {
-      isAttacking = state;
-      if (!state) {
-        return;
-      }
-      const loopAttack = () => {
-        if (!isAttacking) {
-          return;
-        }
-        const target = bot.nearestEntity();
-        if (target) {
-          console.log('attack target', target);
-          bot.attack(target);
-        } else {
-          console.log('swing arm');
-          bot.swingArm();
-        }
-        setTimeout(loopAttack, 200);
-      };
-      loopAttack();
+      handleAttackButton(state);
       return;
     }
 
@@ -165,13 +146,164 @@ ipcMain.on('move-forward', () => {
   });
 });
 
+ipcMain.on('autoFish', () => {
+  fishing.autoFish(bot);
+});
+
 ipcMain.on('suicide', () => {
   console.log("suicide called");
   bot.chat('/kill');
 });
 
-app.whenReady().then(startBot);
+ipcMain.on('chat', (ev, message) => {
+  if (!bot) return;
+
+  if (message.startsWith('!')) {
+    handleChatCommands(message.slice(1));
+  } else {
+    bot.chat(message);
+  }
+});
+
+app.whenReady().then(async function () {
+  await startBot();
+
+  const replServer = repl.start({
+    prompt: 'bot> ',
+    input: process.stdin,
+    output: process.stdout
+  });
+  replServer.context.bot = bot;
+  console.log("BOT:", bot)
+
+  replServer.context.showInv = () => {
+    const items = bot.inventory.items();
+    // Node  console.table is great for tabular data
+    console.table(items.map(i => ({
+      slot: i.slot,
+      name: i.name,
+      id: i.type,
+      count: i.count
+    })));
+  };
+  console.log('🔎 REPL ready! Type `bot` or `showInv()` at the prompt.');
+});
 
 app.on('window-all-closed', () => {
   app.quit();
 });
+
+
+//////////////////////////////////////////////////////////////////
+// helper functions
+//////////////////////////////////////////////////////////////////
+
+
+function getAttackSpeed() {
+  // base speed
+  let total = 4.0;
+
+  // 2) if holding an item that modifies attack-speed, apply that too
+  const held = bot.heldItem;
+  if (held) {
+    // look up the item definition
+    const def = mcData.items[held.type];
+    if (def && def.attributeModifiers) {
+      for (const mod of def.attributeModifiers) {
+        if (mod.attributeName === 'generic.attack_speed') {
+          total += mod.amount;
+        }
+      }
+    }
+  }
+  return total;
+}
+
+function handleAttackButton(state) {
+  async function attackLoop() {
+    if (!isAttacking) return;
+
+    {
+      const e = bot.nearestEntity();
+      console.log("nearest entity:", e.name, "distance:", bot.entity.position.distanceTo(e.position));
+    }
+
+    // pick nearest live mob within 3 blocks
+    const target = bot.nearestEntity(e =>
+      e.type === 'hostile' &&
+      bot.entity.position.distanceTo(e.position) <= 7
+    );
+
+    let delay = Math.floor(1000 / getAttackSpeed());
+    if (target) {
+      if (bot.entity.position.distanceTo(target.position) <= 3) {
+        console.log('▶️ Attacking', target.name || target.type, 'id=', target.id);
+        await bot.attack(target);
+      } else {
+        console.log('Hostile creature near, but not within attack range, wait...');
+        delay = 50;
+      }
+    } else {
+      console.log('No target to attack, try to dig');
+      const block = bot.blockAtCursor(4.5);
+      if (block && bot.canDigBlock(block)) {
+        console.log('▶️ Digging', block.name, 'at', block.position);
+        try {
+          await bot.dig(block);
+        } catch (err) {
+          console.log('❌ Failed to dig:', err.message);
+        }
+      } else {
+        console.log('— nothing diggable in sight');
+      }
+      delay = 100;
+    }
+
+    console.log(
+      `[attackLoop] waiting ${delay}ms until next swing (speed=${getAttackSpeed().toFixed(2)} atk/s)`
+    );
+    setTimeout(attackLoop, delay);
+  }
+
+  isAttacking = state;
+  if (isAttacking) attackLoop();
+}
+
+function handleChatCommands(chatmsg) {
+  const parts = chatmsg.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+  console.log("handleChatCommands() cmd:", cmd, ", args:", args);
+  switch (cmd) {
+    case 'goto':
+      if (args.length !== 1) {
+        bot.chat('Usage: !goto <playername>');
+      } else {
+        gotoPlayer(args[0]);
+      }
+      break;
+    case 'fish':
+      if (args.length == 0) {
+        fishing.autoFish(bot);
+      } else if (args.length === 1 && args[0] === "stop") {
+        fishing.stop();
+      } else {
+        bot.chat('Usage: !fish [stop]');
+      }
+      break;
+
+    default:
+      bot.chat(`❓ Unknown command: ${cmd}`);
+  }
+}
+
+function gotoPlayer(playerName) {
+  const playerInfo = bot.players[playerName];
+  if (!playerInfo || !playerInfo.entity) {
+    bot.chat(`❌ I don't see a player named ${playerName}`);
+    return;
+  }
+  const { x, y, z } = playerInfo.entity.position;
+  bot.chat(`⛏ Going to ${playerName} at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
+  bot.pathfinder.setGoal(new GoalNear(x, y, z, 1));
+}

@@ -25,6 +25,7 @@
         Object.entries(keyDownMap).map(([k, [c, _]]) => [k, [c, false]])
     );
     document.addEventListener('keydown', e => {
+        if (!isLocked()) return;
         const m = keyDownMap[e.code];
         if (m) {
             e.preventDefault();
@@ -33,6 +34,7 @@
         }
     });
     document.addEventListener('keyup', e => {
+        if (!isLocked()) return;
         const m = keyUpMap[e.code];
         if (m) {
             e.preventDefault();
@@ -47,21 +49,24 @@
             e.preventDefault();
             return;
         }
+        if (!isLocked()) return;
         e.preventDefault();
         if (e.button === 0) api.setControl('attack', true);
         if (e.button === 2) api.setControl('use', true);
     });
     canvas.addEventListener('mouseup', e => {
+        if (!isLocked()) return;
         e.preventDefault();
         if (e.button === 0) api.setControl('attack', false);
         if (e.button === 2) api.setControl('use', false);
     });
-    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    canvas.addEventListener('contextmenu', e => {
+        if (isLocked()) e.preventDefault();
+    });
 
     // mouse-move → look
     document.addEventListener('mousemove', e => {
         if (isLocked()) {
-            console.log("mousemove ev", e);
             api.look(e.movementX, e.movementY);
         }
     });
